@@ -13049,7 +13049,7 @@ impl PdfDocument {
         if !extractor.can_process_xobject(xobject_ref) {
             return Ok(());
         }
-        extractor.push_xobject(xobject_ref);
+        extractor.push_xobject(xobject_ref, name);
 
         // Load XObject
         let xobject = match self.load_object(xobject_ref) {

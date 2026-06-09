@@ -4146,6 +4146,40 @@ impl PyTextChar {
     fn mcid(&self) -> Option<u32> {
         self.inner.mcid
     }
+
+    /// Content provenance source: `"xobject"` if this character was emitted
+    /// inside one or more Form XObjects, `"page"` if it came directly from
+    /// the page content stream. See `xobject_path` for the nesting chain.
+    #[getter]
+    fn source(&self) -> &'static str {
+        match self.inner.xobject_path {
+            Some(_) => "xobject",
+            None => "page",
+        }
+    }
+
+    /// Form XObject nesting chain this character was emitted inside,
+    /// outermost first (e.g. `["Fig1", "Inner"]`). Empty list for content
+    /// drawn directly by the page content stream. The last element is the
+    /// immediate parent XObject's resource name.
+    #[getter]
+    fn xobject_path(&self) -> Vec<String> {
+        match self.inner.xobject_path {
+            Some(ref chain) => chain.to_vec(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Form XObject nesting depth: `0` for page-stream content, `1` for a
+    /// glyph inside a top-level figure XObject, `2` for an XObject nested
+    /// one level deeper, and so on. Equivalent to `len(xobject_path)`.
+    #[getter]
+    fn xobject_depth(&self) -> usize {
+        self.inner
+            .xobject_path
+            .as_ref()
+            .map_or(0, |chain| chain.len())
+    }
 }
 
 #[pyclass(module = "pdf_oxide.pdf_oxide", name = "TextSpan", skip_from_py_object)]
@@ -4306,6 +4340,25 @@ fn path_to_py_dict(py: Python<'_>, path: &crate::elements::PathContent) -> PyRes
     match path.layer {
         Some(ref name) => d.set_item("layer", name.as_str())?,
         None => d.set_item("layer", py.None())?,
+    }
+
+    // Content provenance: where this path's operators originated.
+    // `source` is "xobject" when emitted inside one or more Form XObjects,
+    // "page" for page-stream content. `xobject_path` is the nesting chain
+    // of resource names (outermost first; empty for page content), and
+    // `xobject_depth` is its length. Mirrors the same fields on TextChar.
+    // See PDF spec ISO 32000-1:2008 §8.10 (Form XObjects).
+    match path.xobject_path {
+        Some(ref chain) => {
+            d.set_item("source", "xobject")?;
+            d.set_item("xobject_path", chain.to_vec())?;
+            d.set_item("xobject_depth", chain.len())?;
+        },
+        None => {
+            d.set_item("source", "page")?;
+            d.set_item("xobject_path", Vec::<String>::new())?;
+            d.set_item("xobject_depth", 0usize)?;
+        },
     }
 
     // Expose path operations as list of dicts for vector extraction use cases

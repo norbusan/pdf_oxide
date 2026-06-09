@@ -442,6 +442,7 @@ mod tests {
             ascent: 0.95 * 12.0,
             descent: -0.35 * 12.0,
             matrix: None,
+            xobject_path: None,
         }
     }
 

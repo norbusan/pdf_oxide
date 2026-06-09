@@ -3009,6 +3009,7 @@ mod tests {
             reading_order: None,
             artifact_type: None,
             layer: None,
+            xobject_path: None,
         };
 
         let mut builder = ContentStreamBuilder::new();
@@ -3039,6 +3040,7 @@ mod tests {
             reading_order: None,
             artifact_type: None,
             layer: None,
+            xobject_path: None,
         };
 
         let mut builder = ContentStreamBuilder::new();
@@ -3070,6 +3072,7 @@ mod tests {
             reading_order: None,
             artifact_type: None,
             layer: None,
+            xobject_path: None,
         };
 
         let mut builder = ContentStreamBuilder::new();
@@ -3100,6 +3103,7 @@ mod tests {
             reading_order: None,
             artifact_type: None,
             layer: None,
+            xobject_path: None,
         };
 
         let mut builder = ContentStreamBuilder::new();

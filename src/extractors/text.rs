@@ -2497,6 +2497,22 @@ pub struct TextExtractor<'doc> {
     /// covers `Pattern(_)` in the data model so future pattern-content
     /// walks can populate it.
     mcid_scope_stack: Vec<crate::structure::McidScope>,
+    /// Stack of Form XObject resource names currently being walked,
+    /// outermost first. Empty at page level; each `Do` into a Form
+    /// XObject pushes its resource name (e.g. `"Fig1"`) and the matching
+    /// pop on exit restores the parent. Maintained in lockstep with
+    /// `mcid_scope_stack` (which tracks the same nesting by `ObjectRef`),
+    /// but carries the human-readable `/Name` the consumer asked for in
+    /// the content-provenance feature.
+    xobject_name_stack: Vec<String>,
+    /// Cached snapshot of [`Self::xobject_name_stack`] as a shared slice,
+    /// stamped onto every `TextChar` emitted while it is active.
+    ///
+    /// `None` at page level (page-stream content). Recomputed only when
+    /// the name stack changes (Form XObject enter/exit) so the per-glyph
+    /// cost is a single `Arc` refcount bump rather than a `Vec<String>`
+    /// allocation. See [`crate::layout::TextChar::xobject_path`].
+    current_provenance: Option<Arc<[String]>>,
 }
 
 impl<'doc> TextExtractor<'doc> {
@@ -2584,6 +2600,8 @@ impl<'doc> TextExtractor<'doc> {
             // extraction. Form XObject `Do` invocations push their
             // own scope on top.
             mcid_scope_stack: vec![crate::structure::McidScope::Page(0)],
+            xobject_name_stack: Vec::new(),
+            current_provenance: None,
         }
     }
 
@@ -2611,6 +2629,19 @@ impl<'doc> TextExtractor<'doc> {
             .last()
             .cloned()
             .unwrap_or(crate::structure::McidScope::Page(0))
+    }
+
+    /// Recompute [`Self::current_provenance`] from the XObject name stack.
+    ///
+    /// Called only on Form XObject enter/exit (not per glyph), so each
+    /// emitted `TextChar` just clones the cached `Arc`. `None` when the
+    /// stack is empty (page-stream content).
+    fn refresh_provenance(&mut self) {
+        self.current_provenance = if self.xobject_name_stack.is_empty() {
+            None
+        } else {
+            Some(Arc::from(self.xobject_name_stack.as_slice()))
+        };
     }
 
     /// Create a new text extractor with custom merging configuration.
@@ -5086,6 +5117,7 @@ impl<'doc> TextExtractor<'doc> {
                                                 final_matrix.e,
                                                 final_matrix.f,
                                             ]),
+                                            xobject_path: self.current_provenance.clone(),
                                         };
                                         if !self.is_content_suppressed() {
                                             self.chars.push(space_char);
@@ -6381,6 +6413,13 @@ impl<'doc> TextExtractor<'doc> {
                 self.mcid_scope_stack
                     .push(crate::structure::McidScope::Form(xobject_ref));
 
+                // Track the XObject resource name for content provenance,
+                // in lockstep with the scope push above. Recompute the
+                // cached `Arc` snapshot now so glyphs emitted inside this
+                // form carry the full nesting chain.
+                self.xobject_name_stack.push(name.to_string());
+                self.refresh_provenance();
+
                 self.xobject_depth += 1;
                 let parse_result = if self.excluded_inks.is_empty() {
                     parse_and_execute_text_only(&stream_data, |op| self.execute_operator(op))
@@ -6402,6 +6441,10 @@ impl<'doc> TextExtractor<'doc> {
                 // success so the parent stream's scope is correctly
                 // restored even on errors.
                 self.mcid_scope_stack.pop();
+                // Pop the provenance name pushed in lockstep and refresh
+                // the cached snapshot back to the parent scope.
+                self.xobject_name_stack.pop();
+                self.refresh_provenance();
                 if let Err(e) = parse_result {
                     log::debug!(
                         "Error parsing Form XObject '{}' content stream: {}, partial text may be extracted",
@@ -8166,6 +8209,7 @@ impl<'doc> TextExtractor<'doc> {
                             final_matrix.e + x_offset_user,
                             final_matrix.f,
                         ]),
+                        xobject_path: self.current_provenance.clone(),
                     };
 
                     if !self.is_content_suppressed() {
@@ -10254,6 +10298,7 @@ mod tests {
                 ascent: 11.4,
                 descent: -4.2,
                 matrix: None,
+                xobject_path: None,
             },
             TextChar {
                 char: 'A',
@@ -10273,6 +10318,7 @@ mod tests {
                 ascent: 11.4,
                 descent: -4.2,
                 matrix: None,
+                xobject_path: None,
             },
         ];
 
@@ -10304,6 +10350,7 @@ mod tests {
                 ascent: 11.4,
                 descent: -4.2,
                 matrix: None,
+                xobject_path: None,
             },
             TextChar {
                 char: 'A',
@@ -10323,6 +10370,7 @@ mod tests {
                 ascent: 11.4,
                 descent: -4.2,
                 matrix: None,
+                xobject_path: None,
             },
         ];
 
@@ -10360,6 +10408,7 @@ mod tests {
             ascent: 11.4,
             descent: -4.2,
             matrix: None,
+            xobject_path: None,
         };
 
         // 't' at x=100, ' ' at x=105, 'r' at x=106.5 (within 2pt of ' ' but different char)
@@ -10403,6 +10452,7 @@ mod tests {
             ascent: 11.4,
             descent: -4.2,
             matrix: None,
+            xobject_path: None,
         };
 
         extractor.chars = vec![make_char('A', 100.0), make_char('A', 100.5)];
@@ -10442,6 +10492,7 @@ mod tests {
             ascent: 11.4,
             descent: -4.2,
             matrix: None,
+            xobject_path: None,
         };
 
         // (glyph, Helvetica per-em advance width)
@@ -10496,6 +10547,7 @@ mod tests {
             ascent: 11.4,
             descent: -4.2,
             matrix: None,
+            xobject_path: None,
         };
 
         // Stroke pass and fill pass typically land within 0.05 pt of each
@@ -10759,6 +10811,7 @@ mod tests {
                 ascent: 11.4,
                 descent: -4.2,
                 matrix: None,
+                xobject_path: None,
             },
             TextChar {
                 char: 'A',
@@ -10778,6 +10831,7 @@ mod tests {
                 ascent: 11.4,
                 descent: -4.2,
                 matrix: None,
+                xobject_path: None,
             },
         ];
 
@@ -10810,6 +10864,7 @@ mod tests {
                 ascent: 11.4,
                 descent: -4.2,
                 matrix: None,
+                xobject_path: None,
             },
             TextChar {
                 char: 'A',
@@ -10829,6 +10884,7 @@ mod tests {
                 ascent: 11.4,
                 descent: -4.2,
                 matrix: None,
+                xobject_path: None,
             },
         ];
 
@@ -10860,6 +10916,7 @@ mod tests {
                 ascent: 11.4,
                 descent: -4.2,
                 matrix: None,
+                xobject_path: None,
             },
             TextChar {
                 char: 'B',
@@ -10879,6 +10936,7 @@ mod tests {
                 ascent: 11.4,
                 descent: -4.2,
                 matrix: None,
+                xobject_path: None,
             },
         ];
 

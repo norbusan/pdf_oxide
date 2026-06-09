@@ -6,6 +6,7 @@
 use crate::extractors::text::ArtifactType;
 use crate::geometry::Rect;
 use crate::layout::Color;
+use std::sync::Arc;
 
 /// Vector path content that can be extracted from or written to a PDF.
 ///
@@ -61,6 +62,39 @@ pub struct PathContent {
     /// (Marked Content).
     #[serde(default)]
     pub layer: Option<String>,
+    /// Content provenance: the Form XObject nesting chain this path was
+    /// emitted inside, outermost first (e.g. `["Fig1", "Inner"]`).
+    ///
+    /// `None` means the path came directly from the page content stream.
+    /// Mirrors [`crate::layout::TextChar::xobject_path`] so consumers can
+    /// tell figure-local vector content (axis rules, frame strokes inside
+    /// a `/FigN` XObject) apart from body-stream paths — the same signal
+    /// hidden-text detection uses for glyphs. `Arc`-wrapped so every path
+    /// in one XObject scope shares a single allocation.
+    /// Reference: ISO 32000-1:2008 §8.10 (Form XObjects).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_xobject_path"
+    )]
+    pub xobject_path: Option<Arc<[String]>>,
+}
+
+/// serde helper: serialize an `Option<Arc<[String]>>` provenance chain as a
+/// plain optional list of strings. `Arc<[String]>` does not implement
+/// `Serialize` without serde's global `rc` feature, so we serialize the
+/// underlying slice instead. See [`PathContent::xobject_path`].
+fn serialize_xobject_path<S>(
+    value: &Option<Arc<[String]>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match value {
+        Some(chain) => serializer.serialize_some(&chain[..]),
+        None => serializer.serialize_none(),
+    }
 }
 
 impl PathContent {
@@ -79,6 +113,7 @@ impl PathContent {
             reading_order: None,
             artifact_type: None,
             layer: None,
+            xobject_path: None,
         }
     }
 
@@ -98,6 +133,7 @@ impl PathContent {
             reading_order: None,
             artifact_type: None,
             layer: None,
+            xobject_path: None,
         }
     }
 
@@ -130,6 +166,15 @@ impl PathContent {
     /// active OCG name to each extracted path.
     pub fn with_layer(mut self, layer: impl Into<String>) -> Self {
         self.layer = Some(layer.into());
+        self
+    }
+
+    /// Set the Form XObject provenance chain. Used by `PathExtractor`
+    /// while recursing into Form XObjects so each extracted path records
+    /// the nesting chain of resource names it was emitted inside. `None`
+    /// (the default) marks page-stream content.
+    pub fn with_xobject_path(mut self, path: Option<Arc<[String]>>) -> Self {
+        self.xobject_path = path;
         self
     }
 
@@ -599,6 +644,7 @@ impl Default for PathContent {
             reading_order: None,
             artifact_type: None,
             layer: None,
+            xobject_path: None,
         }
     }
 }

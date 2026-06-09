@@ -36,6 +36,7 @@ fn create_char_with_transform(
         ascent: 0.95,
         descent: -0.35,
         matrix,
+        xobject_path: None,
     }
 }
 
@@ -141,6 +142,7 @@ fn test_textchar_advance_width() {
         ascent: 0.95,
         descent: -0.35,
         matrix: None,
+        xobject_path: None,
     };
 
     assert_eq!(char.advance_width, 15.5);
@@ -192,6 +194,7 @@ fn test_textchar_with_matrix_builder() {
         ascent: 0.95,
         descent: -0.35,
         matrix: None,
+        xobject_path: None,
     };
 
     let matrix = [1.0, 0.0, 0.0, 1.0, 50.0, 50.0];

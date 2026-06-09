@@ -1303,6 +1303,7 @@ mod tests {
             ascent: 0.95 * font_size,
             descent: -0.35 * font_size,
             matrix: None,
+            xobject_path: None,
         }
     }
 

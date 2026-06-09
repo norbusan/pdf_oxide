@@ -2,6 +2,12 @@
 
 All notable changes to PDFOxide are documented here.
 
+## [Unreleased]
+
+### Added
+
+- **Per-character / per-path content provenance (`xobject_path`)** — `extract_chars` (`TextChar`) and `extract_paths` (`PathContent`) now record the Form XObject nesting chain each item was emitted inside, outermost first (e.g. `["Fig1", "Inner"]`), or `None` for content drawn directly by the page content stream (ISO 32000-1:2008 §8.10). This lets downstream consumers separate figure-local content — tiny axis labels, frame strokes inside a `/FigN` XObject — from genuine document-body content, the dominant false-positive source in hidden-text / obfuscation detection. The Rust field is `Option<Arc<[String]>>` (one shared allocation per XObject scope, a refcount bump per glyph). Python exposes three derived views on each `TextChar` and each `extract_paths` dict: `source` (`"page"` / `"xobject"`), `xobject_path` (`list[str]`, empty for page content), and `xobject_depth` (`int`). Additive and non-breaking; page-stream content (the common case) serializes nothing extra.
+
 ## [0.3.61] - 2026-06-07
 
 > Press-accurate CMYK→RGB rendering via document `/OutputIntents` ICC profiles, vertical writing mode (WMode 1 / tategaki) support, RTL (Hebrew/Arabic) and Indic text-extraction fixes, separation-plate image rendering and ActualText extraction, path flattening (`PathContent::to_points`), Node.js quickstart and form-display fixes, macOS OCR detection, faster table-heavy extraction, and cross-OS + cross-language CI verification

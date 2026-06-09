@@ -42,6 +42,7 @@ use crate::content::graphics_state::{GraphicsState, Matrix};
 use crate::elements::{LineCap, LineJoin, PathContent, PathOperation};
 use crate::geometry::{Point, Rect};
 use crate::layout::Color;
+use std::sync::Arc;
 
 /// Copy-only graphics state for path extraction (no String/Vec fields).
 /// Enables allocation-free q/Q save/restore unlike the full [`GraphicsState`].
@@ -167,6 +168,18 @@ pub struct PathExtractor {
     /// inherits the layer already in effect. The top entry is therefore
     /// always the active layer, making `current_layer` O(1).
     oc_layer_stack: Vec<Option<String>>,
+    /// Stack of Form XObject resource names currently being walked,
+    /// outermost first (content provenance). Empty at page level; pushed
+    /// by [`Self::push_xobject`] and popped by [`Self::pop_xobject`] /
+    /// [`Self::pop_xobject_failed`] in lockstep with the
+    /// `xobject_processing_stack`. The matching resource name is supplied
+    /// by the `Do` driver in `document.rs`.
+    xobject_name_stack: Vec<String>,
+    /// Cached snapshot of [`Self::xobject_name_stack`] as a shared slice,
+    /// stamped onto every `PathContent` emitted while it is active. `None`
+    /// at page level. Recomputed only on XObject enter/exit, so each path
+    /// just clones the `Arc`. See [`crate::elements::PathContent::xobject_path`].
+    current_provenance: Option<Arc<[String]>>,
 }
 
 impl PathExtractor {
@@ -189,6 +202,8 @@ impl PathExtractor {
             max_xobject_depth: 100,
             cached_xobject_dict: None,
             oc_layer_stack: Vec::new(),
+            xobject_name_stack: Vec::new(),
+            current_provenance: None,
         }
     }
 
@@ -358,8 +373,14 @@ impl PathExtractor {
     }
 
     /// Push an XObject onto the processing stack (called before processing).
-    pub(crate) fn push_xobject(&mut self, xobject_ref: crate::object::ObjectRef) {
+    ///
+    /// `name` is the resource name from the `Do` operator (e.g. `"Fig1"`);
+    /// it is pushed onto the provenance name stack in lockstep so each
+    /// path emitted inside this XObject records its nesting chain.
+    pub(crate) fn push_xobject(&mut self, xobject_ref: crate::object::ObjectRef, name: &str) {
         self.xobject_processing_stack.push(xobject_ref);
+        self.xobject_name_stack.push(name.to_string());
+        self.refresh_provenance();
     }
 
     /// Pop an XObject from the processing stack after successful processing.
@@ -370,12 +391,26 @@ impl PathExtractor {
             let key = (ref_obj, Self::ctm_fingerprint(&self.ctm));
             self.processed_xobjects.insert(key);
         }
+        self.xobject_name_stack.pop();
+        self.refresh_provenance();
     }
 
     /// Pop an XObject from the processing stack after a failure.
     /// Does NOT mark it as permanently processed, allowing retry.
     pub(crate) fn pop_xobject_failed(&mut self) {
         self.xobject_processing_stack.pop();
+        self.xobject_name_stack.pop();
+        self.refresh_provenance();
+    }
+
+    /// Recompute [`Self::current_provenance`] from the XObject name stack.
+    /// Called only on XObject enter/exit. `None` when at page level.
+    fn refresh_provenance(&mut self) {
+        self.current_provenance = if self.xobject_name_stack.is_empty() {
+            None
+        } else {
+            Some(Arc::from(self.xobject_name_stack.as_slice()))
+        };
     }
 
     /// Update the current transformation matrix.
@@ -646,6 +681,11 @@ impl PathExtractor {
         // Attach the active Optional Content Group (PDF "layer") name, if
         // the path was emitted inside a `BDC /OC … EMC` region.
         path.layer = self.current_layer();
+
+        // Attach the Form XObject provenance chain (content provenance):
+        // the nesting of resource names this path was emitted inside, or
+        // `None` for page-stream paths.
+        path.xobject_path = self.current_provenance.clone();
 
         self.paths.push(path);
 
@@ -985,7 +1025,7 @@ mod tests {
         let r = crate::object::ObjectRef::new(42, 0);
 
         assert!(ext.can_process_xobject(r));
-        ext.push_xobject(r);
+        ext.push_xobject(r, "Fig1");
         ext.pop_xobject(); // success path
         assert!(
             !ext.can_process_xobject(r),
@@ -999,7 +1039,7 @@ mod tests {
         let r = crate::object::ObjectRef::new(42, 0);
 
         assert!(ext.can_process_xobject(r));
-        ext.push_xobject(r);
+        ext.push_xobject(r, "Fig1");
         ext.pop_xobject_failed(); // failure path
         assert!(ext.can_process_xobject(r), "Failed XObject should be retryable");
     }

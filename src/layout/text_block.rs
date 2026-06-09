@@ -7,6 +7,7 @@ use crate::extractors::text::ArtifactType;
 use crate::geometry::{Point, Rect};
 use crate::structure::McidScope;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// A text span (complete string from a Tj/TJ operator).
 ///
@@ -119,6 +120,25 @@ pub(crate) fn is_zero_u8(v: &u8) -> bool {
     *v == 0
 }
 
+/// serde helper: serialize an `Option<Arc<[String]>>` provenance chain as a
+/// plain optional list of strings. `Arc<[String]>` does not implement
+/// `Serialize` without serde's global `rc` feature, so we serialize the
+/// underlying slice (which does) instead. Paired with
+/// `skip_serializing_if = "Option::is_none"` so page-stream content (the
+/// common case) emits nothing.
+pub(crate) fn serialize_xobject_path<S>(
+    value: &Option<Arc<[String]>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match value {
+        Some(chain) => serializer.serialize_some(&chain[..]),
+        None => serializer.serialize_none(),
+    }
+}
+
 /// serde skip helper: omit a `0.0` rotation (the overwhelming common case) from
 /// serialized output so existing fixtures stay unchanged.
 pub(crate) fn is_zero_f32(v: &f32) -> bool {
@@ -191,6 +211,9 @@ impl TextSpan {
                         ascent: 0.95 * self.font_size,
                         descent: -0.35 * self.font_size,
                         matrix: Some([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+                        // TextSpan does not carry provenance; only the
+                        // direct extract_chars path populates xobject_path.
+                        xobject_path: None,
                     }
                 })
                 .collect()
@@ -222,6 +245,9 @@ impl TextSpan {
                     ascent: 0.95 * self.font_size,
                     descent: -0.35 * self.font_size,
                     matrix: Some([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+                    // TextSpan does not carry provenance; only the
+                    // direct extract_chars path populates xobject_path.
+                    xobject_path: None,
                 })
                 .collect()
         }
@@ -354,6 +380,27 @@ pub struct TextChar {
     /// ```
     /// Where (a,d) = scaling, (b,c) = rotation/skew, (e,f) = translation.
     pub matrix: Option<[f32; 6]>,
+
+    /// Content provenance: the Form XObject nesting chain this character
+    /// was emitted inside, outermost first (e.g. `["Fig1", "Inner"]` for a
+    /// glyph drawn by an XObject `/Inner` invoked from `/Fig1`).
+    ///
+    /// `None` means the character came directly from the page content
+    /// stream. This separates body-stream text from glyphs that live inside
+    /// an included figure/logo XObject — the dominant false-positive source
+    /// in hidden-text detection, where a 1 pt label inside a `/FigN`
+    /// XObject is benign but the same in the body stream is suspicious.
+    /// `xobject_path.is_none()` ⇒ page stream; `.len()` is the nesting
+    /// depth; the last element is the immediate parent XObject.
+    ///
+    /// `Arc`-wrapped so all glyphs in one XObject scope share a single
+    /// allocation. Reference: ISO 32000-1:2008 §8.10 (Form XObjects).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_xobject_path"
+    )]
+    pub xobject_path: Option<Arc<[String]>>,
 }
 
 impl Default for TextChar {
@@ -376,6 +423,7 @@ impl Default for TextChar {
             ascent: 0.95 * 12.0,
             descent: -0.35 * 12.0,
             matrix: Some([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+            xobject_path: None,
         }
     }
 }
@@ -454,6 +502,7 @@ impl TextChar {
             ascent: 0.95 * font_size,
             descent: -0.35 * font_size,
             matrix: None,
+            xobject_path: None,
         }
     }
 }
@@ -721,6 +770,7 @@ mod tests {
             ascent: 0.95 * 12.0,
             descent: -0.35 * 12.0,
             matrix: None,
+            xobject_path: None,
         }
     }
 
@@ -782,6 +832,7 @@ mod tests {
             ascent: 0.95 * 12.0,
             descent: -0.35 * 12.0,
             matrix: None,
+            xobject_path: None,
         };
         assert!(c.is_monospace);
     }

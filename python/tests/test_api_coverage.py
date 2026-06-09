@@ -1028,3 +1028,127 @@ class TestPdfDocumentEncryptedBytes:
         encrypted = doc2.to_bytes_encrypted("pw", "pw")
         assert len(encrypted) > 0
         assert encrypted[:5] == _PDF_MAGIC
+
+
+# ── content provenance (xobject_path) ─────────────────────────────────────────
+
+
+def _build_provenance_pdf() -> bytes:
+    """Page draws body text "BODY", then invokes Form XObject /Fig1 which
+    shows "LABEL", strokes a rect, and invokes nested Form /Inner ("NESTED").
+    Mirrors tests/test_xobject_provenance.rs."""
+    parts: list[bytes] = []
+    offsets: list[int] = []
+    buf = bytearray(b"%PDF-1.4\n")
+
+    def obj(body: bytes) -> None:
+        offsets.append(len(buf))
+        buf.extend(body)
+
+    obj(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\n")
+    obj(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n\n")
+    obj(
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]\n"
+        b"   /Contents 4 0 R\n"
+        b"   /Resources << /Font << /F1 7 0 R >> /XObject << /Fig1 5 0 R >> >>\n"
+        b">>\nendobj\n\n"
+    )
+
+    page_content = (
+        b"BT /F1 12 Tf 100 700 Td (BODY) Tj ET\n"
+        b"q 1 0 0 1 0 0 cm /Fig1 Do Q\n"
+        b"BT /F1 12 Tf 100 650 Td (PQR) Tj ET"
+    )
+    obj(
+        b"4 0 obj\n<< /Length %d >>\nstream\n%s\nendstream\nendobj\n\n"
+        % (len(page_content), page_content)
+    )
+
+    fig1 = b"BT /F1 12 Tf 20 20 Td (LABEL) Tj ET\nq 10 10 100 80 re S Q\n/Inner Do"
+    obj(
+        b"5 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 300 300]\n"
+        b"   /Resources << /Font << /F1 7 0 R >> /XObject << /Inner 6 0 R >> >>\n"
+        b"   /Length %d >>\nstream\n%s\nendstream\nendobj\n\n" % (len(fig1), fig1)
+    )
+
+    inner = b"BT /F1 12 Tf 30 30 Td (NESTED) Tj ET"
+    obj(
+        b"6 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 200 200]\n"
+        b"   /Resources << /Font << /F1 7 0 R >> >>\n"
+        b"   /Length %d >>\nstream\n%s\nendstream\nendobj\n\n" % (len(inner), inner)
+    )
+
+    obj(
+        b"7 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica\n"
+        b"   /Encoding /WinAnsiEncoding >>\nendobj\n\n"
+    )
+
+    xref_offset = len(buf)
+    n_obj = len(offsets) + 1
+    xref = bytearray(b"xref\n0 %d\n0000000000 65535 f \n" % n_obj)
+    for off in offsets:
+        xref.extend(b"%010d 00000 n \n" % off)
+    buf.extend(xref)
+    buf.extend(
+        b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (n_obj, xref_offset)
+    )
+    _ = parts
+    return bytes(buf)
+
+
+class TestContentProvenance:
+    """Ask 1: TextChar / path provenance surfaced to Python."""
+
+    def test_textchar_has_provenance_attrs(self):
+        doc = _make_simple_doc()
+        c = doc.extract_chars(0)[0]
+        assert hasattr(c, "source")
+        assert hasattr(c, "xobject_path")
+        assert hasattr(c, "xobject_depth")
+
+    def test_body_text_is_page_source(self):
+        doc = _make_simple_doc()
+        for c in doc.extract_chars(0):
+            assert c.source == "page"
+            assert c.xobject_path == []
+            assert c.xobject_depth == 0
+
+    def test_figure_text_reports_xobject_chain(self):
+        doc = PdfDocument.from_bytes(_build_provenance_pdf())
+        chars = doc.extract_chars(0)
+
+        def first(ch):
+            return next(c for c in chars if c.char == ch)
+
+        body = first("B")
+        assert body.source == "page"
+        assert body.xobject_path == []
+        assert body.xobject_depth == 0
+
+        label = first("L")
+        assert label.source == "xobject"
+        assert label.xobject_path == ["Fig1"]
+        assert label.xobject_depth == 1
+
+        nested = first("N")
+        assert nested.source == "xobject"
+        assert nested.xobject_path == ["Fig1", "Inner"]
+        assert nested.xobject_depth == 2
+
+    def test_provenance_unwinds_after_xobject(self):
+        doc = PdfDocument.from_bytes(_build_provenance_pdf())
+        chars = doc.extract_chars(0)
+        for needle in "PQR":
+            c = next(c for c in chars if c.char == needle)
+            assert c.source == "page", f"{needle!r} leaked {c.xobject_path}"
+            assert c.xobject_depth == 0
+
+    def test_paths_report_provenance(self):
+        doc = PdfDocument.from_bytes(_build_provenance_pdf())
+        paths = doc.extract_paths(0)
+        assert len(paths) > 0
+        # Path dicts expose source / xobject_path / xobject_depth.
+        fig1_paths = [p for p in paths if p.get("xobject_path") == ["Fig1"]]
+        assert fig1_paths, f"no path tagged inside /Fig1: {[p.get('xobject_path') for p in paths]}"
+        assert fig1_paths[0]["source"] == "xobject"
+        assert fig1_paths[0]["xobject_depth"] == 1
